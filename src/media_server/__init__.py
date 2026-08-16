@@ -31,10 +31,11 @@ def get_local_ip() -> str:
 # Config and global states
 PORT = 8080
 SEGMENT_DURATION = 3
-ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
+STATIC_DIR = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "static"))
 MEDIA_DIR = None
 
-CACHE_DIR = os.path.join(ROOT_DIR, "cache")
+# Cache is stored in the user's home folder to ensure write access and persist settings across updates
+CACHE_DIR = os.path.join(os.path.expanduser("~"), ".caddy-video-server")
 THUMB_DIR = os.path.join(CACHE_DIR, "thumbnails")
 PREVIEW_DIR = os.path.join(CACHE_DIR, "previews")
 
@@ -515,16 +516,16 @@ def get_video_stream(video_path: str):
 
 # Static files routes
 app.mount("/cache", StaticFiles(directory=CACHE_DIR), name="cache")
-app.mount("/thumbnails", StaticFiles(directory=os.path.join(ROOT_DIR, "thumbnails")), name="thumbnails")
+app.mount("/thumbnails", StaticFiles(directory=os.path.join(STATIC_DIR, "thumbnails")), name="thumbnails")
 
 # Serve the static SPA UI
 @app.get("/app.js")
 def get_app_js():
-    return FileResponse(os.path.join(ROOT_DIR, "app.js"))
+    return FileResponse(os.path.join(STATIC_DIR, "app.js"))
 
 @app.get("/")
 def get_index():
-    return FileResponse(os.path.join(ROOT_DIR, "index.html"))
+    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
 
 def main():
     global MEDIA_DIR, PORT, SEGMENT_DURATION
@@ -550,7 +551,7 @@ def main():
     log_message("=" * 60)
     log_message("      AeroMedia - Local Media Server (FastAPI)")
     log_message("=" * 60)
-    log_message(f"Web Directory:       {ROOT_DIR}")
+    log_message(f"Web Directory:       {STATIC_DIR}")
     log_message(f"Media Source Path:   {MEDIA_DIR}")
     log_message(f"Segment Duration:    {SEGMENT_DURATION}s")
     log_message(f"Local Access:        http://localhost:{PORT}")

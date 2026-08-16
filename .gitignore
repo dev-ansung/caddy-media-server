@@ -11,8 +11,8 @@ __pycache__/
 .pytest_cache/
 
 # Project caches & thumbnails
-cache/
-thumbnails/
+/cache/
+/thumbnails/
 
 # Packaging
 *.egg-info/
