@@ -377,20 +377,21 @@ function renderSidebarFolderTree() {
 // --- FILE SYSTEM NAVIGATION CONTROLLER ---
 function navigateTo(targetPath) {
   const container = document.getElementById('media-content-container');
+  const decodedPath = decodeURIComponent(targetPath);
   if (container) {
     AppState.scrollHistory[AppState.currentPath] = container.scrollTop;
   }
 
-  AppState.currentPath = targetPath;
-  window.location.hash = targetPath;
+  AppState.currentPath = decodedPath;
+  window.location.hash = decodedPath;
 
   renderBreadcrumbs();
   renderMediaContent();
   renderSidebarFolderTree();
 
   setTimeout(() => {
-    if (AppState.scrollHistory[targetPath] !== undefined) {
-      container.scrollTop = AppState.scrollHistory[targetPath];
+    if (AppState.scrollHistory[decodedPath] !== undefined) {
+      container.scrollTop = AppState.scrollHistory[decodedPath];
     } else {
       container.scrollTop = 0;
     }
@@ -398,7 +399,7 @@ function navigateTo(targetPath) {
 }
 
 window.addEventListener('hashchange', () => {
-  const hashPath = window.location.hash.substring(1) || '/';
+  const hashPath = decodeURIComponent(window.location.hash.substring(1) || '/');
   if (AppState.currentPath !== hashPath) {
     navigateTo(hashPath);
   }

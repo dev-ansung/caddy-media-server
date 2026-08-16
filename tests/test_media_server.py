@@ -120,7 +120,7 @@ def test_scan_media_directory(mock_media_folder):
     assert root_vid["size"] == 1024 * 1024
     assert root_vid["name"] == "root_video.mp4"
     assert root_vid["dir"] == "/"
-    assert root_vid["thumbnailStatus"] == "pending"
+    assert root_vid["thumbnailStatus"] == "completed"
 
 def test_api_files_endpoint(mock_media_folder):
     response = client.get("/api/files")

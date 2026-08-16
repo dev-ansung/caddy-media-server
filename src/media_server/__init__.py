@@ -55,6 +55,25 @@ def log_message(msg: str, level: str = "INFO"):
     # Also print to stdout
     print(f"[{timestamp}] [{level}] {msg}")
 
+METADATA_CACHE_PATH = os.path.join(CACHE_DIR, "metadata_cache.json")
+
+def load_metadata_cache() -> dict:
+    if os.path.exists(METADATA_CACHE_PATH):
+        try:
+            with open(METADATA_CACHE_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def save_metadata_cache(cache: dict):
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        with open(METADATA_CACHE_PATH, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
 # Detect FFmpeg binaries
 FFMPEG_PATH = shutil.which("ffmpeg")
 FFPROBE_PATH = shutil.which("ffprobe")
@@ -87,14 +106,7 @@ def save_resume_db(db: Dict[str, int]):
     except Exception as e:
         log_message(f"Failed to write resume database: {e}", "ERROR")
 
-# Thread-safe Background Extraction Worker
-task_queue = queue.Queue()
-queue_status = {
-    "active_item": None,
-    "pending_count": 0,
-    "completed_count": 0,
-    "total_jobs": 0
-}
+# Background queue removed for on-demand scaling.
 
 def generate_video_hash(relative_path: str) -> str:
     """Creates a unique hash of the path for safe cache naming."""
@@ -188,51 +200,7 @@ def extract_preview_ffmpeg(video_path: str, output_path: str, duration: int) -> 
         log_message(f"Error running FFmpeg for preview extraction: {e}", "ERROR")
     return False
 
-def worker_thread_loop():
-    global queue_status
-    log_message("Background extraction worker thread started.", "INFO")
-    
-    while True:
-        try:
-            task = task_queue.get()
-            if task is None:
-                # Poison pill to shutdown thread
-                break
-                
-            file_name = task["name"]
-            file_path = task["abs_path"]
-            file_hash = task["hash"]
-            duration = task["duration"]
-            
-            queue_status["active_item"] = file_name
-            queue_status["pending_count"] = task_queue.qsize()
-            
-            thumb_out = os.path.join(THUMB_DIR, f"{file_hash}.jpg")
-            preview_out = os.path.join(PREVIEW_DIR, f"{file_hash}.mp4")
-            
-            # 1. Process Thumbnail if missing
-            if not os.path.exists(thumb_out):
-                log_message(f"Generating thumbnail for: {file_name}", "WORKER")
-                success = extract_thumbnail_ffmpeg(file_path, thumb_out, duration)
-                if success:
-                    log_message(f"Thumbnail created successfully: {file_name}", "WORKER")
-                else:
-                    log_message(f"Failed to generate thumbnail for: {file_name}", "ERROR")
-            
-            queue_status["completed_count"] += 1
-            queue_status["pending_count"] = task_queue.qsize()
-            queue_status["active_item"] = None  # Reset active item to avoid constant client polling when idle
-            task_queue.task_done()
-            
-        except Exception as e:
-            log_message(f"Queue worker encountered error: {e}", "ERROR")
-            
-    queue_status["active_item"] = None
-    log_message("Background extraction worker thread stopped.", "INFO")
-
-# Start background worker
-worker_thread = threading.Thread(target=worker_thread_loop, daemon=True)
-worker_thread.start()
+# Note: Background extraction worker thread was replaced by on-demand generation for scaling.
 
 # --- FASTAPI SERVER DEFINITION ---
 app = FastAPI(title="AeroMedia Local Media Server")
@@ -284,6 +252,9 @@ def scan_media_directory(media_path: str):
     folders = set()
     files = {}
     
+    metadata_cache = load_metadata_cache()
+    cache_dirty = False
+    
     for root, dirs, filenames in os.walk(media_path):
         rel_path = os.path.relpath(root, media_path)
         if rel_path == '.':
@@ -302,7 +273,7 @@ def scan_media_directory(media_path: str):
             for idx in range(2, len(parts)):
                 parent = '/' + '/'.join(parts[1:idx])
                 folders.add(parent)
-                
+                 
         for filename in filenames:
             if filename.lower().endswith(('.mp4', '.m4v', '.mov', '.mkv')):
                 full_path = os.path.join(root, filename)
@@ -311,13 +282,21 @@ def scan_media_directory(media_path: str):
                 
                 try:
                     size = os.path.getsize(full_path)
+                    mtime = os.path.getmtime(full_path)
                 except OSError:
                     size = 0
+                    mtime = 0
                 
-                duration = get_video_duration_ffprobe(full_path)
+                cache_key = f"{file_hash}_{size}_{mtime}"
+                if cache_key in metadata_cache:
+                    duration = metadata_cache[cache_key]
+                else:
+                    duration = get_video_duration_ffprobe(full_path)
+                    metadata_cache[cache_key] = duration
+                    cache_dirty = True
                 
-                # Check if thumbnails/previews are generated
-                thumb_url = f"/cache/thumbnails/{file_hash}.jpg" if os.path.exists(os.path.join(THUMB_DIR, f"{file_hash}.jpg")) else None
+                # Thumbnails are generated on-demand when requested by the browser
+                thumb_url = f"/cache/thumbnails/{file_hash}.jpg"
                 preview_url = f"/cache/previews/{file_hash}.mp4" if os.path.exists(os.path.join(PREVIEW_DIR, f"{file_hash}.mp4")) else None
                 
                 files[rel_file_path] = {
@@ -328,11 +307,13 @@ def scan_media_directory(media_path: str):
                     "size": size,
                     "duration": duration,
                     "thumbnail": thumb_url,
-                    "thumbnailStatus": "completed" if thumb_url else "pending",
+                    "thumbnailStatus": "completed",
                     "preview": preview_url,
                     "resolution": "1080p (H.264)" if filename.lower().endswith('.mp4') else "Direct Container",
                     "audio": "AAC Audio"
                 }
+    if cache_dirty:
+        save_metadata_cache(metadata_cache)
     return sorted(list(folders)), files
 
 # REST API Endpoints
@@ -345,28 +326,6 @@ def api_get_files():
     log_message("API request: GET /api/files - Scanning file system.", "HTTP")
     folders, files = scan_media_directory(MEDIA_DIR)
     
-    # Automatically queue if thumbnails are missing and ffmpeg is available
-    for rel_file_path, file in files.items():
-        if FFMPEG_PATH and not file["thumbnail"]:
-            file_hash = generate_video_hash(rel_file_path)
-            full_path = os.path.join(MEDIA_DIR, rel_file_path.lstrip('/'))
-            
-            already_queued = False
-            for q_item in list(task_queue.queue):
-                if q_item["hash"] == file_hash:
-                    already_queued = True
-                    break
-            if not already_queued:
-                task_queue.put({
-                    "name": file["name"],
-                    "abs_path": full_path,
-                    "hash": file_hash,
-                    "duration": file["duration"]
-                })
-                        
-    queue_status["pending_count"] = task_queue.qsize()
-    queue_status["total_jobs"] = queue_status["completed_count"] + queue_status["pending_count"]
-    
     return {
         "folders": folders,
         "files": files,
@@ -375,11 +334,63 @@ def api_get_files():
         }
     }
 
+@app.get("/cache/thumbnails/{file_hash}.jpg")
+def get_cached_thumbnail(file_hash: str):
+    """
+    Serves a thumbnail from cache. If it doesn't exist, extracts it
+    on-demand synchronously and returns it. Zero background pre-generation queue.
+    """
+    thumb_path = os.path.join(THUMB_DIR, f"{file_hash}.jpg")
+    if os.path.exists(thumb_path):
+        return FileResponse(thumb_path, media_type="image/jpeg")
+
+    # Locate the target video file by hash
+    target_abs_path = None
+    target_duration = 3600
+    
+    for root, dirs, filenames in os.walk(MEDIA_DIR):
+        rel_path = os.path.relpath(root, MEDIA_DIR)
+        rel_dir = '/' if rel_path == '.' else '/' + rel_path.replace(os.path.sep, '/')
+        depth = rel_path.count(os.path.sep) + 1 if rel_path != '.' else 0
+        if depth > 10:
+            continue
+        for filename in filenames:
+            if filename.lower().endswith(('.mp4', '.m4v', '.mov', '.mkv')):
+                rel_file_path = (rel_dir if rel_dir != '/' else '') + '/' + filename
+                if generate_video_hash(rel_file_path) == file_hash:
+                    target_abs_path = os.path.join(root, filename)
+                    metadata_cache = load_metadata_cache()
+                    try:
+                        size = os.path.getsize(target_abs_path)
+                        mtime = os.path.getmtime(target_abs_path)
+                        cache_key = f"{file_hash}_{size}_{mtime}"
+                        target_duration = metadata_cache.get(cache_key, 3600)
+                    except OSError:
+                        pass
+                    break
+        if target_abs_path:
+            break
+
+    if not target_abs_path:
+        fallback_path = os.path.join(STATIC_DIR, "thumbnails", "space_nebula.jpg")
+        return FileResponse(fallback_path, media_type="image/jpeg")
+
+    success = extract_thumbnail_ffmpeg(target_abs_path, thumb_path, target_duration)
+    if success and os.path.exists(thumb_path):
+        return FileResponse(thumb_path, media_type="image/jpeg")
+    
+    fallback_path = os.path.join(STATIC_DIR, "thumbnails", "space_nebula.jpg")
+    return FileResponse(fallback_path, media_type="image/jpeg")
+
 @app.get("/api/queue")
 def api_get_queue():
-    """Returns background worker queue details."""
-    queue_status["pending_count"] = task_queue.qsize()
-    return queue_status
+    """Mock endpoint returning empty queue status to remain compatible with frontend."""
+    return {
+        "active_item": None,
+        "pending_count": 0,
+        "completed_count": 0,
+        "total_jobs": 0
+    }
 
 @app.get("/api/logs")
 def api_get_logs():
@@ -506,12 +517,13 @@ def get_video_stream(video_path: str):
     Streams the raw video file. Starlette's FileResponse automatically processes
     HTTP Range requests for scrubbing, seeking, and responsive tablet playback.
     """
-    abs_filepath = os.path.join(MEDIA_DIR, video_path.lstrip("/"))
+    import urllib.parse
+    decoded_path = urllib.parse.unquote(video_path)
+    abs_filepath = os.path.join(MEDIA_DIR, decoded_path.lstrip("/"))
     if not os.path.exists(abs_filepath) or os.path.isdir(abs_filepath):
         log_message(f"HTTP GET /videos/{video_path} failed: file not found", "ERROR")
         raise HTTPException(status_code=404, detail="Video file not found")
         
-    # Check Range header in request for logging
     return FileResponse(abs_filepath, media_type="video/mp4")
 
 # Static files routes
