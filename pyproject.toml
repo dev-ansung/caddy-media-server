@@ -1,0 +1,27 @@
+[project]
+name = "media-server"
+version = "0.1.0"
+description = "AeroMedia Local Media Server POC"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.141.1",
+    "uvicorn>=0.52.3",
+]
+
+[project.scripts]
+caddy-video-server = "media_server:main"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+filterwarnings = [
+    "ignore:.*starlette.testclient.*:DeprecationWarning",
+    "ignore:.*starlette.testclient.*:UserWarning",
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+]

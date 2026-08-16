@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dim" class="h-full bg-base-300 overflow-hidden">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Local Media Server POC</title>
+  <!-- Tailwind CSS & DaisyUI CDNs -->
+  <link href="https://cdn.jsdelivr.net/npm/daisyui@4.12.10/dist/full.min.css" rel="stylesheet" type="text/css" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Lucide Icons CDN -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <style>
+    /* Prevent default gestures on tablet to ensure custom player gestures work cleanly */
+    .no-select {
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    /* Custom scrollbar styling for slick dark look */
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: rgba(255, 255, 255, 0.25);
+    }
+  </style>
+</head>
+<body class="h-full text-base-content no-select flex flex-col font-sans">
+
+  <!-- TOP HEADER -->
+  <header class="navbar bg-base-100 border-b border-base-200 px-4 flex-none z-10 shadow-sm">
+    <div class="flex-1 gap-3">
+      <div class="bg-primary text-primary-content p-2 rounded-lg flex items-center justify-center">
+        <i data-lucide="hard-drive" class="w-6 h-6"></i>
+      </div>
+      <div>
+        <h1 class="text-lg font-bold tracking-tight leading-none">AeroMedia</h1>
+        <span class="text-xs text-base-content/50">Caddy LAN Server</span>
+      </div>
+    </div>
+    
+    <!-- Search & Network Status -->
+    <div class="flex-none gap-4">
+      <div class="form-control relative hidden md:block">
+        <input type="text" id="search-input" placeholder="Search 1,000+ files..." class="input input-bordered input-sm w-64 pl-10 focus:outline-none focus:border-primary" />
+        <i data-lucide="search" class="w-4 h-4 absolute left-3 top-2.5 text-base-content/40"></i>
+      </div>
+
+      <!-- LAN Connect QR Badge (DaisyUI Modal Trigger) -->
+      <button onclick="qr_modal.showModal()" class="btn btn-outline btn-sm btn-secondary gap-1">
+        <i data-lucide="qr-code" class="w-4 h-4"></i>
+        <span>Scan to Connect</span>
+      </button>
+
+      <!-- Active Worker Status Badge -->
+      <div class="badge badge-success gap-1.5 py-3 hidden sm:flex">
+        <span class="relative flex h-2 w-2">
+          <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-success opacity-75"></span>
+          <span class="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+        </span>
+        <span id="worker-status-badge">Worker Idle</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- MAIN WORKSPACE -->
+  <main class="flex-1 flex flex-row overflow-hidden relative">
+
+    <!-- LEFT SIDEBAR: Directory Tree & Queue Log -->
+    <aside class="w-80 bg-base-100 border-r border-base-200 flex flex-col hidden lg:flex flex-none">
+      
+      <!-- Directory Tree Section -->
+      <div class="flex-1 flex flex-col overflow-hidden">
+        <div class="p-4 border-b border-base-200 flex items-center justify-between">
+          <span class="font-semibold text-sm tracking-wide text-base-content/75 flex items-center gap-1.5">
+            <i data-lucide="folder-tree" class="w-4 h-4"></i> Folders
+          </span>
+          <span id="total-folders-count" class="badge badge-sm badge-neutral">0</span>
+        </div>
+        
+        <!-- Nested Folder List Container -->
+        <div class="flex-1 overflow-y-auto p-2" id="sidebar-folder-tree">
+          <!-- Populated by JS -->
+          <div class="flex justify-center items-center py-10">
+            <span class="loading loading-spinner loading-md text-primary"></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Task Queue Progress Widget -->
+      <div class="border-t border-base-200 bg-base-200/50 p-4">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-xs font-semibold uppercase tracking-wider text-base-content/60 flex items-center gap-1">
+            <i data-lucide="cpu" class="w-3.5 h-3.5"></i> Task Queue
+          </span>
+          <span id="queue-percentage" class="text-xs font-bold text-primary">0%</span>
+        </div>
+        <progress id="queue-progress-bar" class="progress progress-primary w-full h-2" value="0" max="100"></progress>
+        <div class="flex justify-between items-center mt-2 text-[10px] text-base-content/50">
+          <span id="queue-count-text">0 files remaining</span>
+          <span id="queue-speed-text">0.0 MB/s</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- CENTER AREA: Browser & Log Panel -->
+    <section class="flex-1 flex flex-col overflow-hidden bg-base-200">
+      
+      <!-- Navigation Bar (Breadcrumbs & Mode toggles) -->
+      <div class="bg-base-100 px-6 py-3 border-b border-base-200 flex items-center justify-between flex-none gap-4">
+        
+        <!-- Breadcrumbs path -->
+        <div class="text-sm breadcrumbs overflow-x-auto whitespace-nowrap py-1 pr-4" id="path-breadcrumbs">
+          <!-- Populated by JS -->
+          <ul>
+            <li><a><i data-lucide="home" class="w-4 h-4 mr-1"></i> Root</a></li>
+          </ul>
+        </div>
+
+        <!-- View options and manual cache triggers -->
+        <div class="flex items-center gap-2 flex-none">
+          <button onclick="triggerFolderScan()" class="btn btn-ghost btn-xs gap-1 text-base-content/65 hover:text-primary">
+            <i data-lucide="refresh-cw" class="w-3.5 h-3.5" id="scan-icon"></i>
+            <span>Scan Directory</span>
+          </button>
+          <div class="join border border-base-300">
+            <button id="btn-grid-view" class="btn btn-xs join-item btn-active"><i data-lucide="layout-grid" class="w-3.5 h-3.5"></i></button>
+            <button id="btn-list-view" class="btn btn-xs join-item"><i data-lucide="list" class="w-3.5 h-3.5"></i></button>
+          </div>
+        </div>
+      </div>
+
+      <!-- MAIN MEDIA CONTAINER (Grid / List of directories & files) -->
+      <div class="flex-1 overflow-y-auto p-6" id="media-content-container">
+        <!-- Grid listing folder contents -->
+        <div id="media-grid" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 gap-6">
+          <!-- Dynamic cards injected here -->
+        </div>
+        
+        <!-- Empty folder screen (fallback) -->
+        <div id="media-empty" class="hidden flex flex-col items-center justify-center py-20 text-center">
+          <i data-lucide="folder-open" class="w-16 h-16 text-base-content/20 mb-4 animate-bounce"></i>
+          <h3 class="text-lg font-bold text-base-content/70">No videos in this directory</h3>
+          <p class="text-sm text-base-content/40 max-w-xs mt-1">Nested folders may contain videos. Try exploring other folders.</p>
+        </div>
+      </div>
+
+      <!-- BOTTOM LOG TERMINAL PANEL (Rich Logging) -->
+      <footer class="h-44 bg-neutral border-t border-neutral-focus text-neutral-content flex flex-col flex-none font-mono text-xs overflow-hidden">
+        <div class="flex justify-between items-center px-4 py-1.5 bg-neutral-900 border-b border-neutral-800 text-[10px] uppercase font-bold tracking-wider text-neutral-content/40">
+          <span class="flex items-center gap-1.5">
+            <span class="w-2 h-2 rounded-full bg-error inline-block animate-pulse"></span>
+            Caddy & Python Backend Logs
+          </span>
+          <div class="flex items-center gap-3">
+            <button onclick="clearConsoleLogs()" class="hover:text-neutral-content transition">Clear</button>
+            <span id="log-speed-indicator">Realtime Mode</span>
+          </div>
+        </div>
+        <!-- Logs terminal content -->
+        <div class="flex-1 p-3 overflow-y-auto space-y-1 bg-neutral-950/80" id="console-logs-container">
+          <!-- Injected logs -->
+        </div>
+      </footer>
+    </section>
+
+    <!-- RIGHT PANEL: Video Preview & Details (Tablet Slideout) -->
+    <aside id="preview-panel" class="w-80 bg-base-100 border-l border-base-200 flex flex-col hidden flex-none shadow-xl transform transition-transform duration-300">
+      <div class="p-4 border-b border-base-200 flex justify-between items-center flex-none">
+        <h3 class="font-bold text-sm flex items-center gap-1.5">
+          <i data-lucide="info" class="w-4 h-4 text-info"></i> Details & Preview
+        </h3>
+        <button onclick="closePreviewPanel()" class="btn btn-ghost btn-xs btn-circle">
+          <i data-lucide="x" class="w-4 h-4"></i>
+        </button>
+      </div>
+
+      <!-- Preview Panel Content -->
+      <div class="flex-1 overflow-y-auto p-4 space-y-4">
+        <!-- Dynamic Preview Section -->
+        <div class="space-y-3">
+          <div onclick="openFullscreenPlayerFromPreview()" class="card cursor-pointer bg-base-200 shadow-inner overflow-hidden aspect-video relative group border border-base-300">
+            <div id="preview-loading" class="absolute inset-0 flex flex-col items-center justify-center bg-base-300 z-10">
+              <span class="loading loading-spinner text-primary"></span>
+              <span class="text-[10px] text-base-content/50 mt-1 uppercase tracking-wider">Extracting Preview...</span>
+            </div>
+            <!-- Double buffered video players for seamless zero-flicker segment switching -->
+            <video id="preview-player-1" class="w-full h-full object-cover hidden" muted playsinline></video>
+            <video id="preview-player-2" class="w-full h-full object-cover hidden" muted playsinline></video>
+            <!-- Canvas animation for fallback offline rendering -->
+            <canvas id="preview-canvas" class="w-full h-full object-cover hidden"></canvas>
+
+            <!-- Hover Play Overlay -->
+            <div class="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-200 z-20">
+              <div class="w-12 h-12 rounded-full bg-primary flex items-center justify-center text-primary-content shadow-lg transform scale-90 group-hover:scale-100 transition-transform duration-200">
+                <i data-lucide="play" class="w-6 h-6 fill-current ml-0.5"></i>
+              </div>
+            </div>
+
+            <!-- Floating Badge -->
+            <div class="absolute bottom-2 left-2 badge badge-neutral bg-black/60 text-white text-[10px] border-none uppercase py-2 z-20">
+              Summary Trailer
+            </div>
+          </div>
+
+          <!-- Custom Timeline Bar & Timestamp for subdivisions -->
+          <div id="preview-timeline-container" class="hidden bg-base-200/50 p-2.5 rounded-lg border border-base-200 space-y-2">
+            <div class="flex justify-between items-center text-[10px] font-mono text-base-content/60">
+              <span id="preview-current-timestamp">00:00:00</span>
+              <span id="preview-original-duration">00:00:00</span>
+            </div>
+            <!-- Timeline track -->
+            <div class="relative w-full h-1 bg-neutral-focus rounded overflow-visible">
+              <!-- Dot locator -->
+              <div id="preview-timeline-dot" class="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-3 h-3 bg-primary border-2 border-white rounded-full shadow transition-all duration-150" style="left: 0%"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Video Metadata Card -->
+        <div class="space-y-3">
+          <div>
+            <h4 id="preview-video-title" class="font-bold text-base leading-tight break-words">Video File Title.mp4</h4>
+            <span id="preview-video-path" class="text-xs text-base-content/40 break-all select-all block mt-1">/path/to/video.mp4</span>
+          </div>
+
+          <div class="divider my-1"></div>
+
+          <!-- Technical parameters list -->
+          <div class="grid grid-cols-2 gap-3 text-xs bg-base-200/50 p-3 rounded-lg border border-base-200">
+            <div>
+              <span class="text-base-content/40 block">File Size</span>
+              <span id="preview-video-size" class="font-semibold text-base-content/85">12.4 GB</span>
+            </div>
+            <div>
+              <span class="text-base-content/40 block">Duration</span>
+              <span id="preview-video-duration" class="font-semibold text-base-content/85">02:14:35</span>
+            </div>
+            <div>
+              <span class="text-base-content/40 block">Resolution</span>
+              <span class="font-semibold text-base-content/85">1080p (H.264)</span>
+            </div>
+            <div>
+              <span class="text-base-content/40 block">Audio Codec</span>
+              <span class="font-semibold text-base-content/85">AAC Stereo</span>
+            </div>
+          </div>
+
+          <!-- Playback History / Resume State -->
+          <div class="bg-primary/5 p-3 rounded-lg border border-primary/10 text-xs space-y-1.5" id="preview-resume-state">
+            <span class="text-primary font-bold flex items-center gap-1">
+              <i data-lucide="history" class="w-3.5 h-3.5"></i> Playback Resume Point
+            </span>
+            <p id="preview-resume-text" class="text-base-content/75">You have not started watching this video yet.</p>
+            <progress id="preview-resume-progress" class="progress progress-primary w-full h-1.5" value="0" max="100"></progress>
+          </div>
+        </div>
+      </div>
+
+      <!-- Action Panel Footer -->
+      <div class="p-4 border-t border-base-200 bg-base-200/30 flex flex-col gap-2">
+        <button onclick="playCurrentVideoFullscreen()" class="btn btn-primary btn-block gap-2">
+          <i data-lucide="play" class="w-4 h-4 fill-current"></i>
+          <span>Play Fullscreen</span>
+        </button>
+        <button onclick="resetVideoResumeState()" class="btn btn-outline btn-sm btn-block text-error hover:btn-error">
+          <i data-lucide="rotate-ccw" class="w-3.5 h-3.5"></i>
+          <span>Reset Resume Position</span>
+        </button>
+      </div>
+    </aside>
+
+  </main>
+
+  <!-- FULLSCREEN VIDEO PLAYER MODAL -->
+  <dialog id="video_player_modal" class="modal bg-black no-select">
+    <div class="w-full h-full max-w-none max-h-none rounded-none p-0 bg-black flex flex-col relative overflow-hidden">
+      
+      <!-- Video Element -->
+      <video id="main-video-player" class="w-full h-full object-contain cursor-none" playsinline></video>
+
+      <!-- CUSTOM TABLET-FRIENDLY CONTROLS OVERLAY -->
+      <div id="player-controls-overlay" class="absolute inset-0 flex flex-col justify-between p-6 bg-gradient-to-t from-black/80 via-transparent to-black/60 opacity-100 transition-opacity duration-300 z-20">
+        
+        <!-- Top Overlay Bar -->
+        <div class="flex justify-between items-center">
+          <div class="flex items-center gap-3">
+            <button onclick="closeFullscreenPlayer()" class="btn btn-circle btn-sm btn-neutral bg-black/40 border-none text-white hover:bg-black/60">
+              <i data-lucide="arrow-left" class="w-5 h-5"></i>
+            </button>
+            <div>
+              <h2 id="player-title" class="text-white font-bold text-base leading-tight">Video Title</h2>
+              <span id="player-subtitle" class="text-gray-400 text-xs">Folder Location</span>
+            </div>
+          </div>
+          <div class="flex items-center gap-2">
+            <span id="player-subdivision-badge" class="badge badge-primary gap-1 border-none hidden font-bold text-xs uppercase tracking-wider py-2">
+              <i data-lucide="git-branch" class="w-3 h-3"></i> Summary Tour
+            </span>
+            <span class="badge badge-neutral bg-black/40 text-gray-300 border-none">1080p</span>
+            <span id="player-network-speed" class="badge badge-neutral bg-black/40 text-success border-none gap-1">
+              <i data-lucide="wifi" class="w-3 h-3"></i> Local Direct
+            </span>
+          </div>
+        </div>
+
+        <!-- Touch Gestures Zone Hints (Center of Screen) -->
+        <div class="flex-1 flex flex-row relative my-10 pointer-events-none">
+          <!-- Left Gesture Indicator (Volume) -->
+          <div id="gesture-indicator-left" class="absolute left-6 top-1/2 -translate-y-1/2 flex flex-col items-center gap-1 bg-black/60 text-white p-3 rounded-xl opacity-0 transition-opacity duration-200">
+            <i data-lucide="volume-2" class="w-6 h-6"></i>
+            <span class="text-xs font-bold font-mono" id="gesture-volume-val">100%</span>
+          </div>
+          <!-- Right Gesture Indicator (Brightness/Seek) -->
+          <div id="gesture-indicator-right" class="absolute right-6 top-1/2 -translate-y-1/2 flex flex-col items-center gap-1 bg-black/60 text-white p-3 rounded-xl opacity-0 transition-opacity duration-200">
+            <i data-lucide="brightness" class="w-6 h-6"></i>
+            <span class="text-xs font-bold font-mono" id="gesture-brightness-val">100%</span>
+          </div>
+          
+          <!-- Large Play/Pause Toggle Indicator -->
+          <div id="player-center-play-indicator" class="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 bg-black/60 border border-white/10 text-white p-6 rounded-full opacity-0 scale-75 transition-all duration-300">
+            <i data-lucide="play" class="w-10 h-10 fill-current" id="center-play-icon"></i>
+          </div>
+        </div>
+
+        <!-- Bottom Controls Bar -->
+        <div class="space-y-4">
+          <!-- Timeline Slider & Times -->
+          <div class="flex items-center gap-4 text-xs font-mono text-gray-300">
+            <span id="player-time-current">00:00:00</span>
+            <input type="range" min="0" max="100" value="0" id="player-timeline" class="range range-primary range-xs flex-1 accent-primary" />
+            <span id="player-time-total">00:00:00</span>
+          </div>
+
+          <!-- Controls Buttons Row -->
+          <div class="flex justify-between items-center text-white">
+            <div class="flex items-center gap-4">
+              <!-- Rewind 10s -->
+              <button onclick="playerRewind(10)" class="btn btn-ghost btn-circle btn-sm text-white hover:bg-white/10">
+                <i data-lucide="circle-arrow-left" class="w-5 h-5"></i>
+              </button>
+              <!-- Play / Pause Toggle -->
+              <button onclick="togglePlayerPlayback()" class="btn btn-circle btn-primary shadow-lg">
+                <i data-lucide="play" class="w-6 h-6 fill-current text-primary-content" id="btn-player-play-icon"></i>
+              </button>
+              <!-- Fast Forward 10s -->
+              <button onclick="playerForward(10)" class="btn btn-ghost btn-circle btn-sm text-white hover:bg-white/10">
+                <i data-lucide="circle-arrow-right" class="w-5 h-5"></i>
+              </button>
+            </div>
+
+            <!-- Volume and Settings controls -->
+            <div class="flex items-center gap-4">
+              <!-- Volume Group -->
+              <div class="dropdown dropdown-top dropdown-end flex items-center gap-2">
+                <button class="btn btn-ghost btn-circle btn-sm text-white hover:bg-white/10" id="btn-player-volume-icon-btn">
+                  <i data-lucide="volume-2" class="w-5 h-5" id="btn-player-volume-icon"></i>
+                </button>
+                <input type="range" min="0" max="100" value="100" id="player-volume-slider" class="range range-xs w-24 accent-primary" />
+              </div>
+              
+              <!-- Audio/Subtitles dropdown -->
+              <div class="dropdown dropdown-top dropdown-end">
+                <button tabindex="0" class="btn btn-ghost btn-circle btn-sm text-white hover:bg-white/10">
+                  <i data-lucide="captions" class="w-5 h-5"></i>
+                </button>
+                <ul tabindex="0" class="dropdown-content menu p-2 shadow-2xl bg-base-100 text-base-content rounded-box w-52 border border-base-200">
+                  <li class="menu-title text-xs">Audio Track</li>
+                  <li><a>English AAC 2.0 (Direct)</a></li>
+                  <li class="menu-title text-xs mt-2">Subtitles</li>
+                  <li><a>None</a></li>
+                  <li><a>English (SRT)</a></li>
+                </ul>
+              </div>
+
+              <!-- Speed selector -->
+              <div class="dropdown dropdown-top dropdown-end">
+                <button tabindex="0" class="btn btn-ghost btn-circle btn-sm text-white hover:bg-white/10 font-bold text-xs">
+                  <span id="player-speed-text">1.0x</span>
+                </button>
+                <ul tabindex="0" class="dropdown-content menu p-2 shadow-2xl bg-base-100 text-base-content rounded-box w-32 border border-base-200">
+                  <li><a onclick="setPlaybackSpeed(0.5)">0.5x</a></li>
+                  <li><a onclick="setPlaybackSpeed(1.0)">1.0x</a></li>
+                  <li><a onclick="setPlaybackSpeed(1.25)">1.25x</a></li>
+                  <li><a onclick="setPlaybackSpeed(1.5)">1.5x</a></li>
+                  <li><a onclick="setPlaybackSpeed(2.0)">2.0x</a></li>
+                </ul>
+              </div>
+
+              <button onclick="closeFullscreenPlayer()" class="btn btn-ghost btn-circle btn-sm text-white hover:bg-white/10">
+                <i data-lucide="maximize" class="w-5 h-5"></i>
+              </button>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Touch Gestures Invisible Interceptors (covers middle of screen) -->
+      <div id="gesture-zone-left" class="absolute left-0 top-20 bottom-24 w-[35%] z-10 cursor-col-resize"></div>
+      <div id="gesture-zone-center" class="absolute left-[35%] right-[35%] top-20 bottom-24 z-10 cursor-pointer"></div>
+      <div id="gesture-zone-right" class="absolute right-0 top-20 bottom-24 w-[35%] z-10 cursor-col-resize"></div>
+
+    </div>
+  </dialog>
+
+  <!-- RESUME PLAYBACK CONFIRMATION TOAST/DIALOG -->
+  <dialog id="resume_prompt_modal" class="modal bg-black/40">
+    <div class="modal-box border border-base-200">
+      <h3 class="font-bold text-lg flex items-center gap-2">
+        <i data-lucide="clock" class="text-primary w-5 h-5"></i> Resume Playback?
+      </h3>
+      <p class="py-4 text-sm text-base-content/85">
+        You previously watched this video. Would you like to resume playing where you left off at <span id="resume-time-str" class="font-mono font-bold text-primary">00:00:00</span>?
+      </p>
+      <div class="modal-action">
+        <button onclick="confirmResumePlayback(false)" class="btn btn-outline">Start Over</button>
+        <button onclick="confirmResumePlayback(true)" class="btn btn-primary gap-1">
+          <i data-lucide="play" class="w-4 h-4 fill-current"></i> Resume Playback
+        </button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- LAN ACCESS QR CODE DIALOG -->
+  <dialog id="qr_modal" class="modal bg-black/40">
+    <div class="modal-box max-w-sm border border-base-200 text-center">
+      <form method="dialog">
+        <button class="btn btn-sm btn-circle btn-ghost absolute right-2 top-2">✕</button>
+      </form>
+      <h3 class="font-bold text-lg flex items-center justify-center gap-2 mb-4">
+        <i data-lucide="qr-code" class="text-secondary w-5 h-5"></i> Connect Local Device
+      </h3>
+      
+      <!-- Generated/Rendered QR Code Simulation -->
+      <div class="bg-white p-6 rounded-2xl inline-block shadow-inner border border-base-200 mb-4">
+        <svg id="qr-code-svg" class="w-48 h-48 mx-auto" viewBox="0 0 29 29" shape-rendering="crispEdges">
+          <!-- Simulating a stylized QR code with SVG blocks for quick, zero-dep render -->
+          <path fill="#0d1117" d="M0 0h7v7H0zm22 0h7v7h-7zM0 22h7v7H0zm9 0h2v1H9zm1 1h1v1h-1zm-1 1h2v1H9zm2 1h1v1h-1zm-2 1h2v1H9zm1 1h1v1h-1zm14-5h1v1h-1zm1 1h1v1h-1zm-1 1h2v1h-2zm2 1h1v1h-1zm-2 1h2v1h-2zm1 1h1v1h-1z"/>
+          <!-- Position boxes -->
+          <path fill="#0d1117" d="M1 1h5v5H1zm22 0h5v5h-5zM1 23h5v5H1z"/>
+          <path fill="#0d1117" d="M2 2h3v3H2zm22 0h3v3h-3zM2 24h3v3H2z"/>
+          <!-- Random blocks to look like a real QR code -->
+          <path fill="#0d1117" d="M9 1h1v1H9zm2 0h3v1h-3zm1 2h1v1h-1zm2 1h2v1h-2zm-3 2h1v1h-1zm4-5h1v1h-1zm1 2h2v1h-2zm-3 2h1v1h-1zm2 2h2v1h-2zm-12 9h1v1H9zm2 0h1v1h-1zm-2 1h2v1H9zm2 1h1v1h-1zm-2 1h2v1H9zm2 1h1v1h-1zm5-9h1v1h-1zm2 0h1v1h-1zm-2 1h2v1h-2zm2 1h1v1h-1zm-2 1h2v1h-2zm2 1h1v1h-1zm2-5h1v1h-1zm1 2h2v1h-2zm-3 2h1v1h-1zm2 2h2v1h-2z"/>
+        </svg>
+      </div>
+
+      <div class="bg-base-200 p-3 rounded-lg text-xs space-y-1 text-left font-mono">
+        <div class="flex justify-between">
+          <span class="text-base-content/40">Server IP:</span>
+          <span class="font-bold text-base-content/85">192.168.1.15</span>
+        </div>
+        <div class="flex justify-between">
+          <span class="text-base-content/40">Port:</span>
+          <span class="font-bold text-base-content/85">8080 (Caddy Proxy)</span>
+        </div>
+        <div class="flex justify-between border-t border-base-300 pt-1 mt-1 text-[10px]">
+          <span class="text-base-content/40">Access URL:</span>
+          <span class="font-bold text-primary select-all">http://192.168.1.15:8080</span>
+        </div>
+      </div>
+      
+      <p class="text-xs text-base-content/40 mt-3">
+        Ensure your tablet or phone is connected to the same Wi-Fi network as this media server.
+      </p>
+    </div>
+  </dialog>
+
+  <!-- Script containing mock data generation and UI interactions -->
+  <script src="app.js"></script>
+</body>
+</html>

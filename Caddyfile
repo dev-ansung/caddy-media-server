@@ -1,0 +1,41 @@
+# Caddyfile configuration for Local Media Server (AeroMedia)
+# Serves the frontend static files, routes media directory directly, and reverse-proxies API requests.
+
+:8080 {
+    # Serve static frontend files from the web root
+    root * .
+    file_server
+
+    # Reverse proxy for Python API backend
+    handle_path /api/* {
+        reverse_proxy localhost:8000
+    }
+
+    # Serve the media files folder under /videos/* for streaming with range requests
+    handle_path /videos/* {
+        # The actual path will be dynamically updated by the python script starting Caddy,
+        # or set to the parent directory.
+        root * {args[0]}
+        file_server {
+            hide .*
+            browse
+        }
+        
+        # Add range request headers & cache control optimized for local streaming
+        header {
+            Cache-Control "public, max-age=3600"
+            Access-Control-Allow-Origin "*"
+            Access-Control-Allow-Headers "Range"
+            Access-Control-Expose-Headers "Content-Range, Content-Length, Accept-Ranges"
+        }
+    }
+    
+    # Custom logger for debug logs
+    log {
+        output file ./caddy_access.log {
+            roll_size 10mb
+            roll_keep 5
+        }
+        level INFO
+    }
+}
